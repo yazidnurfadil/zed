@@ -38,7 +38,7 @@ use project::{
     trusted_worktrees::TrustedWorktrees,
 };
 use remote::RemoteConnectionOptions;
-use settings::{Settings as _, SettingsStore};
+use settings::{Settings as _, SettingsLocation, SettingsStore};
 
 use std::any::TypeId;
 use std::sync::Arc;
@@ -224,7 +224,21 @@ impl Render for TitleBar {
             }
         }
 
-        let title_bar_settings = *TitleBarSettings::get_global(cx);
+        let settings_location = self
+            .project
+            .read(cx)
+            .visible_worktrees(cx)
+            .next()
+            .map(|worktree| SettingsLocation {
+                worktree_id: worktree.read(cx).id(),
+                path: util::rel_path::RelPath::empty(),
+            });
+        let title_bar_settings = *TitleBarSettings::get(settings_location, cx);
+
+        self.platform_titlebar.update(cx, |titlebar, _| {
+            titlebar.set_background_override(title_bar_settings.background);
+        });
+
         let button_layout = title_bar_settings.button_layout;
         let is_git_enabled = ProjectSettings::get_global(cx).git.enabled.status;
 

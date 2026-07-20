@@ -1,12 +1,12 @@
 use crate::{
     ItemHandle, MultiWorkspace, Pane, SidebarSide, ToggleWorkspaceSidebar,
-    sidebar_side_context_menu,
+    sidebar_side_context_menu, workspace_settings::StatusBarSettings,
 };
 use gpui::{
     Anchor, AnyView, App, Context, Decorations, Entity, FocusHandle, Focusable, IntoElement,
     ParentElement, Render, Role, SharedString, Styled, Subscription, WeakEntity, Window,
 };
-use settings::{SettingsContent, update_settings_file};
+use settings::{Settings, SettingsContent, SettingsLocation, update_settings_file};
 use std::{any::TypeId, sync::Arc};
 use theme::CLIENT_SIDE_DECORATION_ROUNDING;
 use ui::{ContextMenu, Divider, IconPosition, Indicator, Tooltip, prelude::*, right_click_menu};
@@ -115,6 +115,7 @@ impl Focusable for StatusBar {
 impl Render for StatusBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar = SidebarStatus::query(&self.multi_workspace, cx);
+        let background = self.background_color(cx);
 
         h_flex()
             .id("status-bar")
@@ -151,7 +152,7 @@ impl Render for StatusBar {
             .justify_between()
             .gap(DynamicSpacing::Base08.rems(cx))
             .p(DynamicSpacing::Base04.rems(cx))
-            .bg(cx.theme().colors().status_bar_background)
+            .bg(background)
             .map(|el| match window.window_decorations() {
                 Decorations::Server => el,
                 Decorations::Client { tiling, .. } => el
@@ -179,7 +180,7 @@ impl Render for StatusBar {
                         if needs_gap_fix { px(-1.) } else { px(0.) }
                     })
                     .border_b(px(1.0))
-                    .border_color(cx.theme().colors().status_bar_background),
+                    .border_color(background),
             })
             .child(self.render_left_tools(&sidebar, cx))
             .child(self.render_right_tools(&sidebar, cx))
@@ -187,6 +188,30 @@ impl Render for StatusBar {
 }
 
 impl StatusBar {
+    /// The status bar background: the `status_bar.background` setting override
+    /// (resolved against the project's local settings, like the title bar's)
+    /// or the theme color.
+    fn background_color(&self, cx: &App) -> gpui::Hsla {
+        let settings_location = self
+            .active_pane
+            .read(cx)
+            .project()
+            .upgrade()
+            .and_then(|project| {
+                project
+                    .read(cx)
+                    .visible_worktrees(cx)
+                    .next()
+                    .map(|worktree| SettingsLocation {
+                        worktree_id: worktree.read(cx).id(),
+                        path: util::rel_path::RelPath::empty(),
+                    })
+            });
+        StatusBarSettings::get(settings_location, cx)
+            .background
+            .unwrap_or_else(|| cx.theme().colors().status_bar_background)
+    }
+
     fn render_left_tools(
         &self,
         sidebar: &SidebarStatus,
@@ -236,7 +261,7 @@ impl StatusBar {
     ) -> impl IntoElement {
         let on_right = sidebar.side == SidebarSide::Right;
         let has_notifications = sidebar.has_notifications;
-        let indicator_border = cx.theme().colors().status_bar_background;
+        let indicator_border = self.background_color(cx);
 
         let toggle = sidebar_side_context_menu("sidebar-status-toggle-menu", cx)
             .anchor(if on_right {

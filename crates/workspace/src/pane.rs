@@ -819,6 +819,10 @@ impl Pane {
         self.active_item_index
     }
 
+    pub(crate) fn project(&self) -> &WeakEntity<Project> {
+        &self.project
+    }
+
     pub fn is_active_item_pinned(&self) -> bool {
         self.is_tab_pinned(self.active_item_index)
     }

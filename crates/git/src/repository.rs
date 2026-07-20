@@ -119,6 +119,7 @@ impl InitialGraphCommitData {
             .iter()
             .filter_map(|ref_name| {
                 let tag_name = ref_name.strip_prefix("tag: ")?;
+                let tag_name = tag_name.strip_prefix("refs/tags/").unwrap_or(tag_name);
 
                 if tag_name.is_empty() {
                     return None;
@@ -127,6 +128,58 @@ impl InitialGraphCommitData {
                 Some(tag_name)
             })
             .collect()
+    }
+}
+
+/// A single ref parsed from a `%D` decoration produced with `--decorate=full`.
+/// Short decorations (from data recorded before `--decorate=full` was used, or
+/// from older collab hosts) parse as [`CommitRef::Other`] except for `HEAD` and
+/// tags, which keep their distinctive prefixes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitRef {
+    /// The checked-out branch (`HEAD -> refs/heads/x`), or a detached `HEAD`
+    /// when `branch` is `None`.
+    Head { branch: Option<SharedString> },
+    /// A local branch (`refs/heads/x`).
+    Branch(SharedString),
+    /// A remote-tracking ref (`refs/remotes/origin/x`).
+    Remote {
+        remote: SharedString,
+        branch: SharedString,
+    },
+    /// A tag (`tag: refs/tags/v1`).
+    Tag(SharedString),
+    /// Anything else, e.g. `refs/stash` or a short decoration.
+    Other(SharedString),
+}
+
+impl CommitRef {
+    pub fn parse(decoration: &str) -> Self {
+        if decoration == "HEAD" {
+            return Self::Head { branch: None };
+        }
+        if let Some(target) = decoration.strip_prefix("HEAD -> ") {
+            let branch = target.strip_prefix("refs/heads/").unwrap_or(target);
+            return Self::Head {
+                branch: Some(branch.to_string().into()),
+            };
+        }
+        if let Some(tag) = decoration.strip_prefix("tag: ") {
+            let tag = tag.strip_prefix("refs/tags/").unwrap_or(tag);
+            return Self::Tag(tag.to_string().into());
+        }
+        if let Some(branch) = decoration.strip_prefix("refs/heads/") {
+            return Self::Branch(branch.to_string().into());
+        }
+        if let Some(rest) = decoration.strip_prefix("refs/remotes/")
+            && let Some((remote, branch)) = rest.split_once('/')
+        {
+            return Self::Remote {
+                remote: remote.to_string().into(),
+                branch: branch.to_string().into(),
+            };
+        }
+        Self::Other(decoration.to_string().into())
     }
 }
 
@@ -3161,7 +3214,14 @@ impl GitRepository for RealGitRepository {
 
         async move {
             let log_source_args = log_source.get_args();
-            let mut git_log_command = vec!["log", GRAPH_COMMIT_FORMAT, log_order.as_arg()];
+            // Full decorations make remote refs unambiguous (a local branch may
+            // itself be named "origin/x"); they are shortened again during parsing.
+            let mut git_log_command = vec![
+                "log",
+                GRAPH_COMMIT_FORMAT,
+                "--decorate=full",
+                log_order.as_arg(),
+            ];
             git_log_command.extend(log_source_args.iter().map(|arg| arg.as_ref()));
             let mut command = git.build_command(&git_log_command);
             command.stdout(Stdio::piped());
@@ -3493,9 +3553,13 @@ fn parse_initial_graph_output<'a>(
             let ref_names = if ref_names_str.is_empty() {
                 Vec::new()
             } else {
-                ref_names_str
-                    .split(", ")
-                    .map(|s| SharedString::from(s.to_string()))
+                let mut decorations: Vec<&str> = ref_names_str.split(", ").collect();
+                // Stable sort so remote-tracking refs appear after local refs
+                // and tags, preserving git's order within each group.
+                decorations.sort_by_key(|decoration| decoration.starts_with("refs/remotes/"));
+                decorations
+                    .into_iter()
+                    .map(|decoration| SharedString::from(decoration.to_string()))
                     .collect()
             };
 
@@ -4612,6 +4676,74 @@ mod tests {
         };
 
         assert_eq!(commit.tag_names(), ["v1.0.0", "v1.1.0"]);
+    }
+
+    #[test]
+    fn test_parse_initial_graph_output_orders_remote_refs_last() {
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let line = format!(
+            "{sha}\x00\x00HEAD -> refs/heads/production, \
+             refs/remotes/origin/production, refs/remotes/origin/HEAD, \
+             tag: refs/tags/v1.0.0, refs/heads/origin/not-a-remote"
+        );
+
+        let commits = parse_initial_graph_output(std::iter::once(line.as_str()));
+
+        assert_eq!(commits.len(), 1);
+        // Remote-tracking refs sort last; everything else keeps git's order.
+        // A local branch literally named "origin/not-a-remote" is not treated
+        // as a remote ref.
+        assert_eq!(
+            commits[0].ref_names,
+            [
+                "HEAD -> refs/heads/production",
+                "tag: refs/tags/v1.0.0",
+                "refs/heads/origin/not-a-remote",
+                "refs/remotes/origin/production",
+                "refs/remotes/origin/HEAD",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_commit_ref_parse() {
+        assert_eq!(
+            CommitRef::parse("HEAD -> refs/heads/production"),
+            CommitRef::Head {
+                branch: Some("production".into())
+            }
+        );
+        assert_eq!(CommitRef::parse("HEAD"), CommitRef::Head { branch: None });
+        assert_eq!(
+            CommitRef::parse("refs/heads/origin/not-a-remote"),
+            CommitRef::Branch("origin/not-a-remote".into())
+        );
+        assert_eq!(
+            CommitRef::parse("refs/remotes/origin/feat/nested"),
+            CommitRef::Remote {
+                remote: "origin".into(),
+                branch: "feat/nested".into()
+            }
+        );
+        assert_eq!(
+            CommitRef::parse("tag: refs/tags/v1.0.0"),
+            CommitRef::Tag("v1.0.0".into())
+        );
+        assert_eq!(
+            CommitRef::parse("refs/stash"),
+            CommitRef::Other("refs/stash".into())
+        );
+        // Short decorations from older collab hosts degrade gracefully.
+        assert_eq!(
+            CommitRef::parse("HEAD -> main"),
+            CommitRef::Head {
+                branch: Some("main".into())
+            }
+        );
+        assert_eq!(
+            CommitRef::parse("origin/main"),
+            CommitRef::Other("origin/main".into())
+        );
     }
 
     #[test]

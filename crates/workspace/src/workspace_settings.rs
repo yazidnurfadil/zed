@@ -191,8 +191,9 @@ impl Settings for TabBarSettings {
     }
 }
 
-#[derive(Deserialize, RegisterSetting)]
+#[derive(RegisterSetting)]
 pub struct StatusBarSettings {
+    pub background: Option<gpui::Hsla>,
     pub show: bool,
     pub show_active_file: bool,
     pub active_language_button: bool,
@@ -205,6 +206,10 @@ impl Settings for StatusBarSettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
         let status_bar = content.status_bar.clone().unwrap();
         StatusBarSettings {
+            background: status_bar
+                .background
+                .as_ref()
+                .and_then(|color| theme::try_parse_color(color).ok()),
             show: status_bar.show.unwrap(),
             show_active_file: status_bar.show_active_file.unwrap(),
             active_language_button: status_bar.active_language_button.unwrap(),

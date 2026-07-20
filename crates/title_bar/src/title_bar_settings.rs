@@ -1,8 +1,10 @@
-use gpui::WindowButtonLayout;
+use gpui::{Hsla, WindowButtonLayout};
 use settings::{RegisterSetting, Settings, SettingsContent};
+use theme::try_parse_color;
 
 #[derive(Copy, Clone, Debug, RegisterSetting)]
 pub struct TitleBarSettings {
+    pub background: Option<Hsla>,
     pub show_branch_status_icon: bool,
     pub show_onboarding_banner: bool,
     pub show_user_picture: bool,
@@ -18,6 +20,10 @@ impl Settings for TitleBarSettings {
     fn from_settings(s: &SettingsContent) -> Self {
         let content = s.title_bar.clone().unwrap();
         TitleBarSettings {
+            background: content
+                .background
+                .as_ref()
+                .and_then(|color| try_parse_color(color).ok()),
             show_branch_status_icon: content.show_branch_status_icon.unwrap(),
             show_onboarding_banner: content.show_onboarding_banner.unwrap(),
             show_user_picture: content.show_user_picture.unwrap(),

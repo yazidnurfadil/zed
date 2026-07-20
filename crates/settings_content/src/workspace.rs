@@ -496,6 +496,12 @@ pub struct TabBarSettingsContent {
 #[with_fallible_options]
 #[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq, Eq)]
 pub struct StatusBarSettingsContent {
+    /// Background color of the status bar.
+    /// Overrides the theme's status_bar.background color.
+    /// Accepts hex colors like "#FF0000" or "#FF0000FF".
+    ///
+    /// Default: null (uses theme color)
+    pub background: Option<String>,
     /// Whether to show the status bar.
     ///
     /// Default: true

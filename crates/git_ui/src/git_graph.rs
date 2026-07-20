@@ -12,7 +12,7 @@ use git::{
     BuildCommitPermalinkParams, GitHostingProviderRegistry, GitRemote, Oid, ParsedGitRemote,
     parse_git_remote_url,
     repository::{
-        CommitDiff, CommitFile, InitialGraphCommitData, LogOrder, LogSource, RepoPath,
+        CommitDiff, CommitFile, CommitRef, InitialGraphCommitData, LogOrder, LogSource, RepoPath,
         SearchCommitArgs,
     },
     status::{FileStatus, StatusCode, TrackedStatus},
@@ -52,7 +52,7 @@ use std::{
 use theme::AccentColors;
 use time::{OffsetDateTime, UtcOffset, format_description::BorrowedFormatItem};
 use ui::{
-    Chip, ColumnWidthConfig, CommonAnimationExt as _, ContextMenu, DiffStat, Divider,
+    ColumnWidthConfig, CommonAnimationExt as _, ContextMenu, DiffStat, Divider,
     HeaderResizeInfo, HighlightedLabel, IndentGuideColors, ListItem, ListItemSpacing,
     RedistributableColumnsState, ScrollableHandle, Table, TableInteractionState,
     TableRenderContext, TableResizeBehavior, Tooltip, WithScrollbar, bind_redistributable_columns,
@@ -1304,6 +1304,21 @@ struct DetailPanelCommitMessage {
     scroll_handle: ScrollHandle,
 }
 
+/// A ref badge to render for a commit. A local branch and its same-named
+/// remote-tracking refs share one badge, with the remote names shown as an
+/// italic suffix.
+#[derive(Debug, PartialEq)]
+struct RefChip {
+    /// Display label, e.g. "production", "tag: v1.0", "origin/HEAD".
+    label: SharedString,
+    /// Rev name for the ref context menu; `None` for a detached `HEAD`.
+    menu_ref: Option<SharedString>,
+    /// Remote names merged into this badge, e.g. ["origin"].
+    remotes: Vec<SharedString>,
+    /// Whether this is the checked-out ref, marked with a dot.
+    is_head: bool,
+}
+
 pub struct GitGraph {
     focus_handle: FocusHandle,
     search_state: SearchState,
@@ -1693,66 +1708,150 @@ impl GitGraph {
         git_store.repositories().get(&self.repo_id).cloned()
     }
 
-    /// Checks whether a ref name from git's `%D` decoration
-    ///  format refers to the currently checked-out branch.
-    fn is_head_ref(ref_name: &str, head_branch_name: &Option<SharedString>) -> bool {
-        head_branch_name.as_ref().is_some_and(|head| {
-            ref_name == head.as_ref() || ref_name.strip_prefix("HEAD -> ") == Some(head.as_ref())
-        })
-    }
-
-    /// Extracts a ref name (branch, remote ref, or tag) from a decoration in
-    /// git's `%D` format, returning `None` for a detached `HEAD`.
-    fn ref_name_from_decoration(decoration: &str) -> Option<SharedString> {
-        let name = decoration
-            .strip_prefix("tag: ")
-            .or_else(|| decoration.strip_prefix("HEAD -> "))
-            .unwrap_or(decoration);
-        if name.is_empty() || name == "HEAD" {
-            return None;
-        }
-        Some(SharedString::from(name.to_string()))
-    }
-
-    fn render_chip(
-        &self,
-        name: &SharedString,
-        accent_color: gpui::Hsla,
-        is_head: bool,
-    ) -> impl IntoElement {
-        Chip::new(name.clone())
-            .label_size(LabelSize::Small)
-            .truncate()
-            .map(|chip| {
-                if is_head {
-                    chip.icon(IconName::Check)
-                        .bg_color(accent_color.opacity(0.25))
-                        .border_color(accent_color.opacity(0.5))
-                } else {
-                    chip.bg_color(accent_color.opacity(0.08))
-                        .border_color(accent_color.opacity(0.25))
+    /// Builds the ref badges to render for a commit from its `%D` decorations.
+    /// A remote-tracking ref merges into the badge of the same-named local
+    /// branch (shown as an italic remote-name suffix); remotes without a local
+    /// counterpart get their own badge. The checked-out ref is marked with
+    /// `is_head` and rendered with a dot instead of a `HEAD ->` label.
+    fn ref_chips(
+        ref_names: &[SharedString],
+        head_branch_name: Option<&str>,
+    ) -> Vec<RefChip> {
+        let mut chips: Vec<RefChip> = Vec::new();
+        let mut branch_chips: HashMap<SharedString, usize> = HashMap::default();
+        for decoration in ref_names {
+            match CommitRef::parse(decoration) {
+                CommitRef::Head { branch: Some(branch) } => {
+                    branch_chips.insert(branch.clone(), chips.len());
+                    chips.push(RefChip {
+                        label: branch.clone(),
+                        menu_ref: Some(branch),
+                        remotes: Vec::new(),
+                        is_head: true,
+                    });
                 }
-            })
+                CommitRef::Head { branch: None } => {
+                    chips.push(RefChip {
+                        label: "HEAD".into(),
+                        menu_ref: None,
+                        remotes: Vec::new(),
+                        is_head: true,
+                    });
+                }
+                CommitRef::Branch(branch) => {
+                    let is_head = head_branch_name == Some(branch.as_ref());
+                    branch_chips.insert(branch.clone(), chips.len());
+                    chips.push(RefChip {
+                        label: branch.clone(),
+                        menu_ref: Some(branch),
+                        remotes: Vec::new(),
+                        is_head,
+                    });
+                }
+                CommitRef::Remote { remote, branch } => {
+                    // Remote refs sort after local refs in the graph data, so a
+                    // matching local branch chip already exists if there is one.
+                    if let Some(&chip_idx) = branch_chips.get(&branch) {
+                        chips[chip_idx].remotes.push(remote);
+                    } else {
+                        let name: SharedString = format!("{remote}/{branch}").into();
+                        chips.push(RefChip {
+                            label: name.clone(),
+                            menu_ref: Some(name),
+                            remotes: Vec::new(),
+                            is_head: false,
+                        });
+                    }
+                }
+                CommitRef::Tag(tag) => {
+                    chips.push(RefChip {
+                        label: format!("tag: {tag}").into(),
+                        menu_ref: Some(tag),
+                        remotes: Vec::new(),
+                        is_head: false,
+                    });
+                }
+                CommitRef::Other(name) => {
+                    let is_head = head_branch_name == Some(name.as_ref());
+                    chips.push(RefChip {
+                        label: name.clone(),
+                        menu_ref: Some(name),
+                        remotes: Vec::new(),
+                        is_head,
+                    });
+                }
+            }
+        }
+        chips
     }
 
-    /// Renders a ref chip for the commit at `commit_idx`. Chips that name a ref
-    /// (branch, remote ref, or tag) get a right-click handler that opens a
+    /// Renders a ref badge for the commit at `commit_idx`. Badges that name a
+    /// ref (branch, remote ref, or tag) get a right-click handler that opens a
     /// ref-specific context menu, so that custom commands can be resolved
-    /// against the clicked ref.
+    /// against the clicked ref. The checked-out ref gets a dot marker to the
+    /// left of its badge.
     fn render_ref_chip(
         &self,
-        name: &SharedString,
+        chip: &RefChip,
         accent_color: gpui::Hsla,
-        is_head: bool,
         commit_idx: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let chip = self.render_chip(name, accent_color, is_head);
-        let Some(ref_name) = Self::ref_name_from_decoration(name) else {
-            return chip.into_any_element();
+        let badge = h_flex()
+            .min_w_0()
+            .gap_1()
+            .px_1()
+            .border_1()
+            .rounded_sm()
+            .overflow_hidden()
+            .map(|this| {
+                if chip.is_head {
+                    this.bg(accent_color.opacity(0.25))
+                        .border_color(accent_color.opacity(0.5))
+                } else {
+                    this.bg(accent_color.opacity(0.08))
+                        .border_color(accent_color.opacity(0.25))
+                }
+            })
+            .child(
+                Label::new(chip.label.clone())
+                    .size(LabelSize::Small)
+                    .buffer_font(cx)
+                    .truncate(),
+            )
+            .when(!chip.remotes.is_empty(), |this| {
+                this.child(div().flex_none().w_px().h_3().bg(accent_color.opacity(0.5)))
+                    .child(
+                        Label::new(chip.remotes.join(", "))
+                            .size(LabelSize::Small)
+                            .italic()
+                            .color(Color::Muted)
+                            .buffer_font(cx)
+                            .truncate(),
+                    )
+            });
+
+        let element = h_flex()
+            .min_w_0()
+            .gap_1()
+            .when(chip.is_head, |this| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .size(px(9.))
+                        .rounded_full()
+                        .border_2()
+                        .border_color(accent_color),
+                )
+            })
+            .child(badge);
+
+        let Some(ref_name) = chip.menu_ref.clone() else {
+            return element.into_any_element();
         };
         div()
-            .child(chip)
+            .min_w_0()
+            .child(element)
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -1898,19 +1997,16 @@ impl GitGraph {
                                 .gap_2()
                                 .overflow_hidden()
                                 .children((!commit.data.ref_names.is_empty()).then(|| {
-                                    h_flex().gap_1().children(commit.data.ref_names.iter().map(
-                                        |name| {
-                                            let is_head =
-                                                Self::is_head_ref(name.as_ref(), &head_branch_name);
-                                            self.render_ref_chip(
-                                                name,
-                                                accent_color,
-                                                is_head,
-                                                idx,
-                                                cx,
-                                            )
-                                        },
-                                    ))
+                                    h_flex().gap_1().children(
+                                        Self::ref_chips(
+                                            &commit.data.ref_names,
+                                            head_branch_name.as_deref(),
+                                        )
+                                        .iter()
+                                        .map(|chip| {
+                                            self.render_ref_chip(chip, accent_color, idx, cx)
+                                        }),
+                                    )
                                 }))
                                 .child(subject_label),
                         )
@@ -2858,10 +2954,11 @@ impl GitGraph {
                     )
                     .children((!ref_names.is_empty()).then(|| {
                         h_flex().gap_1().flex_wrap().justify_center().children(
-                            ref_names.iter().map(|name| {
-                                let is_head = Self::is_head_ref(name.as_ref(), &head_branch_name);
-                                self.render_ref_chip(name, accent_color, is_head, selected_idx, cx)
-                            }),
+                            Self::ref_chips(&ref_names, head_branch_name.as_deref())
+                                .iter()
+                                .map(|chip| {
+                                    self.render_ref_chip(chip, accent_color, selected_idx, cx)
+                                }),
                         )
                     }))
                     .child(
@@ -7231,24 +7328,64 @@ mod tests {
     }
 
     #[test]
-    fn test_ref_name_from_decoration() {
+    fn test_ref_chips() {
+        let ref_names: Vec<SharedString> = vec![
+            "HEAD -> refs/heads/production".into(),
+            "refs/heads/staging".into(),
+            "tag: refs/tags/v1.0".into(),
+            "refs/remotes/origin/production".into(),
+            "refs/remotes/upstream/production".into(),
+            "refs/remotes/origin/staging".into(),
+            "refs/remotes/origin/HEAD".into(),
+        ];
+
+        let chips = GitGraph::ref_chips(&ref_names, Some("production"));
+
         assert_eq!(
-            GitGraph::ref_name_from_decoration("HEAD -> main"),
-            Some("main".into())
+            chips,
+            [
+                // The checked-out branch merges its remotes and is marked as
+                // head (rendered as a dot, not a "HEAD ->" label).
+                RefChip {
+                    label: "production".into(),
+                    menu_ref: Some("production".into()),
+                    remotes: vec!["origin".into(), "upstream".into()],
+                    is_head: true,
+                },
+                RefChip {
+                    label: "staging".into(),
+                    menu_ref: Some("staging".into()),
+                    remotes: vec!["origin".into()],
+                    is_head: false,
+                },
+                RefChip {
+                    label: "tag: v1.0".into(),
+                    menu_ref: Some("v1.0".into()),
+                    remotes: Vec::new(),
+                    is_head: false,
+                },
+                // A remote ref without a same-named local branch keeps its own
+                // badge.
+                RefChip {
+                    label: "origin/HEAD".into(),
+                    menu_ref: Some("origin/HEAD".into()),
+                    remotes: Vec::new(),
+                    is_head: false,
+                },
+            ]
         );
+
+        // Detached HEAD gets a badge with no context-menu ref.
+        let chips = GitGraph::ref_chips(&["HEAD".into()], None);
         assert_eq!(
-            GitGraph::ref_name_from_decoration("main"),
-            Some("main".into())
+            chips,
+            [RefChip {
+                label: "HEAD".into(),
+                menu_ref: None,
+                remotes: Vec::new(),
+                is_head: true,
+            }]
         );
-        assert_eq!(
-            GitGraph::ref_name_from_decoration("origin/main"),
-            Some("origin/main".into())
-        );
-        assert_eq!(
-            GitGraph::ref_name_from_decoration("tag: v1.0"),
-            Some("v1.0".into())
-        );
-        assert_eq!(GitGraph::ref_name_from_decoration("HEAD"), None);
     }
 
     #[gpui::test]
