@@ -528,6 +528,7 @@ impl VsCodeSettings {
             git_hosting_providers: None,
             disable_ai: None,
             title_bar: None,
+            status_bar: None,
         }
     }
 
@@ -797,6 +798,7 @@ impl VsCodeSettings {
 
     fn status_bar_settings_content(&self) -> Option<StatusBarSettingsContent> {
         skip_default(StatusBarSettingsContent {
+            background: None,
             show: self.read_bool("workbench.statusBar.visible"),
             show_active_file: None,
             active_language_button: None,

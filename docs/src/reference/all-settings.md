@@ -1783,6 +1783,10 @@ Positive `integer` value between 1 and 32. Values outside of this range will be 
 }
 ```
 
+**Options**
+
+- `background`: Background color of the status bar. Accepts hex colors like `"#FF0000"` or `"#FF0000FF"`. This setting can be used in project-level `.zed/settings.json` to visually distinguish different projects.
+
 There is an experimental setting that completely hides the status bar. This causes major usability problems (you will be unable to use many of Zed's features), but is provided for those who value screen real-estate above all else.
 
 ```json
