@@ -81,6 +81,12 @@ impl From<String> for WindowButtonLayoutContent {
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
 pub struct TitleBarSettingsContent {
+    /// Background color of the title bar.
+    /// Overrides the theme's title_bar.background color.
+    /// Accepts hex colors like "#FF0000" or "#FF0000FF".
+    ///
+    /// Default: null (uses theme color)
+    pub background: Option<String>,
     /// Whether to show git status indicators on the branch icon in the title bar.
     /// When enabled, the branch icon changes to reflect the current repository
     /// status (e.g. modified, added, deleted, or conflict).
